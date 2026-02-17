@@ -174,54 +174,6 @@ def _share_sys_paths(
     return paths_to_share
 
 
-def _build_bundle_registry(
-    prepared: PreparedBundle,
-    parent_session: AmplifierSession,
-) -> dict[str, Bundle]:
-    """
-    Build bundle registry for @mention resolution in spawned sessions.
-
-    Combines:
-    1. Child bundle's own nested bundles (from source_base_paths)
-    2. Parent session's bundle mappings (inherited via mention_resolver)
-
-    Args:
-        prepared: PreparedBundle for the child session.
-        parent_session: Parent session to inherit bundle mappings from.
-
-    Returns:
-        Dict mapping namespace to Bundle for @mention resolution.
-    """
-    from dataclasses import replace as dataclass_replace
-
-    registry: dict[str, Bundle] = {}
-
-    # Get parent's bundle mappings if available
-    parent_resolver = parent_session.coordinator.get_capability("mention_resolver")
-    if parent_resolver and hasattr(parent_resolver, "bundles"):
-        # Copy parent's bundle registry
-        registry.update(parent_resolver.bundles)
-
-    # Add child bundle's nested bundles (override parent if conflict)
-    # This uses the same logic as PreparedBundle._build_bundles_for_resolver
-    bundle = prepared.bundle
-    namespaces = (
-        list(bundle.source_base_paths.keys()) if bundle.source_base_paths else []
-    )
-    if bundle.name and bundle.name not in namespaces:
-        namespaces.append(bundle.name)
-
-    for ns in namespaces:
-        if not ns:
-            continue
-        ns_base_path = bundle.source_base_paths.get(ns, bundle.base_path)
-        if ns_base_path:
-            registry[ns] = dataclass_replace(bundle, base_path=ns_base_path)
-        else:
-            registry[ns] = bundle
-
-    return registry
-
 
 def _extract_recent_turns(
     messages: list[dict],
@@ -553,20 +505,18 @@ async def spawn_bundle(
 
     # --- System prompt factory from bundle (enables @mention resolution) ---
     if prepared.bundle.instruction or prepared.bundle.context:
-        from amplifier_foundation.system_prompt import create_system_prompt_factory
-
-        # Build bundle registry for @mention resolution
-        bundle_registry = _build_bundle_registry(prepared, parent_session)
-
-        # Get working directory
+        # We call PreparedBundle's private _create_system_prompt_factory() to
+        # reuse foundation's system prompt logic without requiring changes to
+        # foundation. This is a private method, so it may change - but the
+        # alternative is duplicating ~60 lines of mention resolution logic or
+        # adding a public API to foundation solely for our use.
         working_dir = parent_session.coordinator.get_capability("session.working_dir")
         base_path = Path(working_dir) if working_dir else Path.cwd()
 
-        # Create factory
-        factory = await create_system_prompt_factory(
+        factory = prepared._create_system_prompt_factory(
             bundle=prepared.bundle,
-            bundle_registry=bundle_registry,
-            base_path=base_path,
+            session=child_session,
+            session_cwd=base_path,
         )
 
         # Set on context manager
